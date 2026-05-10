@@ -483,8 +483,12 @@ async function runCloudflareImageModel(
     return (await env.AI.run(model as string & {}, input, { gateway: { id: gatewayId } })) as unknown as CloudflareAiImageResult;
   } catch (error) {
     const message = error instanceof Error ? error.message : "Cloudflare AI Gateway request failed";
-    throw new HttpError(502, message, "upstream_error");
+    throw new HttpError(cloudflareErrorStatus(message), message, "upstream_error");
   }
+}
+
+function cloudflareErrorStatus(message: string): number {
+  return message.includes("Payment error") ? 402 : 502;
 }
 
 function extractFirstImage(result: CloudflareAiImageResult): string | undefined {

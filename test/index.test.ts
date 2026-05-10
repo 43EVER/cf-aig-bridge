@@ -613,6 +613,29 @@ describe("OpenAI-style validation and error behavior", () => {
     });
   });
 
+  it("preserves Cloudflare payment failures as HTTP 402 errors", async () => {
+    const env = makeEnv({
+      AI: {
+        run: vi.fn(async () => {
+          throw new Error('{"error":"Model execution failed (Payment error)"}');
+        })
+      } as unknown as Ai
+    });
+
+    const response = await worker.fetch(postImageGeneration({ prompt: "payment fails" }), env);
+    const body = await parseJson(response);
+
+    expect(response.status).toBe(402);
+    expect(body).toMatchObject({
+      error: {
+        message: '{"error":"Model execution failed (Payment error)"}',
+        type: "upstream_error",
+        param: null,
+        code: null
+      }
+    });
+  });
+
   it("fails clearly when upstream returns no image payload", async () => {
     const env = makeEnv({
       AI: {
