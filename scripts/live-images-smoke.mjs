@@ -167,6 +167,18 @@ for (const generationCase of [
     timeoutSeconds: 420
   });
 
+  if (isCloudflarePaymentError(result)) {
+    results.push({
+      name: "remaining-image-cases-skipped-after-payment-error",
+      ok: false,
+      expected_status: 200,
+      status: 0,
+      time_ms: 0,
+      error: "Cloudflare returned Payment error for the image model; skipped remaining paid image requests"
+    });
+    break;
+  }
+
   const url = firstImageUrl(result.body);
   if (url) {
     generatedUrlResults.push({ ...generationCase, url });
@@ -373,7 +385,7 @@ function sanitizeBody(body) {
     return body;
   }
 
-  if (Array.isArray(body.data)) {
+  if (Array.isArray(body.data) && body.data.some(isImageDataItem)) {
     return {
       ...body,
       data: body.data.map((item) => ({
@@ -385,6 +397,18 @@ function sanitizeBody(body) {
   }
 
   return body;
+}
+
+function isImageDataItem(item) {
+  return Boolean(
+    item &&
+      typeof item === "object" &&
+      ("url" in item || "b64_json" in item || "revised_prompt" in item)
+  );
+}
+
+function isCloudflarePaymentError(result) {
+  return JSON.stringify(result.body ?? result.error ?? "").includes("Payment error");
 }
 
 function firstImageUrl(body) {
