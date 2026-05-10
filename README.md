@@ -42,6 +42,7 @@ Supported behavior:
 - `response_format` supports `b64_json` and `url`; default is `b64_json`.
 - `size`, `quality`, `background`, and `output_format` are forwarded when present.
 - OpenAI client-only parameters such as `moderation`, `output_compression`, `partial_images`, and `user` are validated but not forwarded to Cloudflare.
+- `input_fidelity` is validated for edit-compatible requests but is not forwarded because Cloudflare `gpt-image-2` does not expose that parameter.
 - `style` is rejected because it is DALL-E-specific and not supported by Cloudflare `gpt-image-2`.
 
 ### `POST /v1/images/edits`
@@ -91,7 +92,7 @@ Returns a simple health response.
 
 Runtime vars/secrets:
 
-- `AI_GATEWAY_ID`: Cloudflare AI Gateway id used for proxied OpenAI models; defaults to `default`.
+- `AI_GATEWAY_ID`: Cloudflare AI Gateway id used for proxied OpenAI models; the checked-in Worker config currently uses `aifuckclaude`.
 - `BRIDGE_API_KEY`: optional bearer token required for all routes.
 - `DEFAULT_IMAGE_MODEL`: defaults image generation requests when the client omits `model`.
 - `PUBLIC_MODEL_PREFIX`: optional prefix stripped from inbound model IDs and prepended in `/v1/models`.
@@ -112,6 +113,14 @@ npm run dev
 ```
 
 Tests mock `env.AI.run`; the Cloudflare Workers test runtime may still print a generic Workers AI billing warning because the binding exists in `wrangler.jsonc`.
+
+Live production smoke/performance test:
+
+```bash
+CURL_PROXY=http://127.0.0.1:7897 npm run test:live
+```
+
+Set `BASE_URL` to test a non-production Worker URL. Set `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` if you want the script to also query AI Gateway logs for provider-side cost/duration fields.
 
 Local test request:
 

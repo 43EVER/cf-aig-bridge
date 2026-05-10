@@ -21,6 +21,7 @@ export interface OpenAIImageGenerationRequest {
   output_format?: unknown;
   partial_images?: unknown;
   stream?: unknown;
+  input_fidelity?: unknown;
   [key: string]: unknown;
 }
 

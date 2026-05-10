@@ -23,6 +23,7 @@ const SUPPORTED_MODERATION_VALUES = new Set(["low", "auto"]);
 const SUPPORTED_OUTPUT_FORMAT_VALUES = new Set(["png", "webp", "jpeg"]);
 const SUPPORTED_QUALITY_VALUES = new Set(["low", "medium", "high", "auto"]);
 const SUPPORTED_SIZE_VALUES = new Set(["1024x1024", "1024x1536", "1536x1024", "auto"]);
+const SUPPORTED_INPUT_FIDELITY_VALUES = new Set(["low", "high"]);
 type MultipartValue = File | string;
 
 export function isImagesGenerationsPath(pathname: string): boolean {
@@ -330,6 +331,7 @@ function validateClientOnlyParams(body: OpenAIImageGenerationRequest): void {
   copyStringEnumParam(body, {}, "moderation", SUPPORTED_MODERATION_VALUES);
   copyIntegerRangeParam(body, {}, "output_compression", 0, 100);
   copyIntegerRangeParam(body, {}, "partial_images", 0, 3);
+  copyStringEnumParam(body, {}, "input_fidelity", SUPPORTED_INPUT_FIDELITY_VALUES);
   readOptionalString(body.user, "user");
 
   if (body.style !== undefined && body.style !== null) {

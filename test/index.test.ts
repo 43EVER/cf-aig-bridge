@@ -119,6 +119,7 @@ describe("OpenAI Images API request compatibility", () => {
       output_compression: 72,
       output_format: "png",
       partial_images: 2,
+      input_fidelity: "high",
       stream: false,
       user: "end-user-123"
     };
@@ -526,6 +527,7 @@ describe("OpenAI-style validation and error behavior", () => {
     ["partial_images", "2"],
     ["partial_images", 4],
     ["partial_images", 1.5],
+    ["input_fidelity", "standard"],
     ["stream", "false"],
     ["stream", true],
     ["style", "vivid"],
