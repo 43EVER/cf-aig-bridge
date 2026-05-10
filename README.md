@@ -91,6 +91,7 @@ Returns a simple health response.
 
 Runtime vars/secrets:
 
+- `AI_GATEWAY_ID`: Cloudflare AI Gateway id used for proxied OpenAI models; defaults to `default`.
 - `BRIDGE_API_KEY`: optional bearer token required for all routes.
 - `DEFAULT_IMAGE_MODEL`: defaults image generation requests when the client omits `model`.
 - `PUBLIC_MODEL_PREFIX`: optional prefix stripped from inbound model IDs and prepended in `/v1/models`.

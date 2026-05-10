@@ -477,7 +477,8 @@ async function runCloudflareImageModel(
   input: Record<string, unknown>
 ): Promise<CloudflareAiImageResult> {
   try {
-    return (await env.AI.run(model as string & {}, input)) as unknown as CloudflareAiImageResult;
+    const gatewayId = env.AI_GATEWAY_ID?.trim() || "default";
+    return (await env.AI.run(model as string & {}, input, { gateway: { id: gatewayId } })) as unknown as CloudflareAiImageResult;
   } catch (error) {
     const message = error instanceof Error ? error.message : "Cloudflare AI Gateway request failed";
     throw new HttpError(502, message, "upstream_error");

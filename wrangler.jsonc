@@ -8,6 +8,7 @@
     "binding": "AI"
   },
   "vars": {
+    "AI_GATEWAY_ID": "default",
     "DEFAULT_IMAGE_MODEL": "gpt-image-2",
     "PUBLIC_MODEL_PREFIX": ""
   }

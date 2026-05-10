@@ -43,6 +43,10 @@ function aiRunMock(env: Env): ReturnType<typeof vi.fn> {
   return env.AI.run as unknown as ReturnType<typeof vi.fn>;
 }
 
+function defaultGatewayOptions(): { gateway: { id: string } } {
+  return { gateway: { id: "default" } };
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
@@ -96,7 +100,11 @@ describe("OpenAI Images API request compatibility", () => {
     expect(response.status).toBe(200);
     expect(Number.isInteger(body.created)).toBe(true);
     expect(body.data).toEqual([{ b64_json: "aGVsbG8=" }]);
-    expect(aiRunMock(env).mock.calls[0]).toEqual(["openai/gpt-image-2", { prompt: "draw a small cube" }]);
+    expect(aiRunMock(env).mock.calls[0]).toEqual([
+      "openai/gpt-image-2",
+      { prompt: "draw a small cube" },
+      defaultGatewayOptions()
+    ]);
   });
 
   it("strips public model prefixes and forwards only upstream-supported input fields", async () => {
@@ -126,8 +134,17 @@ describe("OpenAI Images API request compatibility", () => {
         quality: "high",
         background: "transparent",
         output_format: "png"
-      }
+      },
+      defaultGatewayOptions()
     ]);
+  });
+
+  it("uses the configured Cloudflare AI Gateway id when calling proxied OpenAI models", async () => {
+    const env = makeEnv({ AI_GATEWAY_ID: "images-prod" });
+    const response = await worker.fetch(postImageGeneration({ prompt: "custom gateway" }), env);
+
+    expect(response.status).toBe(200);
+    expect(aiRunMock(env).mock.calls[0][2]).toEqual({ gateway: { id: "images-prod" } });
   });
 
   it("uses DEFAULT_IMAGE_MODEL when clients omit model", async () => {
@@ -284,7 +301,8 @@ describe("OpenAI Images Edit API request compatibility", () => {
         size: "1024x1024",
         quality: "medium",
         output_format: "png"
-      }
+      },
+      defaultGatewayOptions()
     ]);
   });
 
@@ -346,7 +364,8 @@ describe("OpenAI Images Edit API request compatibility", () => {
         prompt: "multipart edit",
         images: ["iVBORw=="],
         size: "1024x1536"
-      }
+      },
+      defaultGatewayOptions()
     ]);
   });
 
@@ -425,7 +444,8 @@ describe("OpenAI Images Variation API request compatibility", () => {
       {
         prompt: "Create a natural variation of the provided image while preserving its main subject and overall composition.",
         images: ["iVBORw=="]
-      }
+      },
+      defaultGatewayOptions()
     ]);
   });
 
