@@ -1,6 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import type { Env } from "../src/types";
+
+const PNG_BYTES = new Uint8Array([137, 80, 78, 71]);
 
 function makeEnv(overrides: Partial<Env> = {}): Env {
   return {
@@ -11,30 +13,126 @@ function makeEnv(overrides: Partial<Env> = {}): Env {
   };
 }
 
-async function parseJson(response: Response): Promise<Record<string, unknown>> {
-  return (await response.json()) as Record<string, unknown>;
+function postImageGeneration(body: Record<string, unknown>, init: RequestInit = {}): Request {
+  return new Request("https://bridge.example/v1/images/generations", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      ...init.headers
+    },
+    body: JSON.stringify(body)
+  });
 }
 
-describe("cf-aig-bridge", () => {
-  it("returns an OpenAI-compatible image generation response with b64_json by default", async () => {
-    const env = makeEnv();
-    const request = new Request("https://bridge.example/v1/images/generations", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model: "gpt-image-2", prompt: "draw a small cube" })
-    });
+async function parseJson<T = Record<string, unknown>>(response: Response): Promise<T> {
+  return (await response.json()) as T;
+}
 
-    const response = await worker.fetch(request, env);
+function aiRunMock(env: Env): ReturnType<typeof vi.fn> {
+  return env.AI.run as unknown as ReturnType<typeof vi.fn>;
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe("OpenAI-compatible endpoint routing", () => {
+  it.each(["/", "/healthz", "/v1"])("serves health metadata from %s", async (path) => {
+    const env = makeEnv();
+    const response = await worker.fetch(new Request(`https://bridge.example${path}`), env);
     const body = await parseJson(response);
 
     expect(response.status).toBe(200);
+    expect(body).toEqual({ ok: true, service: "cf-aig-bridge" });
+    expect(env.AI.run).not.toHaveBeenCalled();
+  });
+
+  it.each(["/v1/models", "/models"])("serves an OpenAI-style model list from %s", async (path) => {
+    const env = makeEnv({ DEFAULT_IMAGE_MODEL: "openai/gpt-image-2", PUBLIC_MODEL_PREFIX: "cf:" });
+    const response = await worker.fetch(new Request(`https://bridge.example${path}`), env);
+    const body = await parseJson<{
+      data: Array<{ id: string; object: string; owned_by: string }>;
+      object: string;
+    }>(response);
+
+    expect(response.status).toBe(200);
+    expect(body.object).toBe("list");
+    expect(body.data).toEqual([{ id: "cf:gpt-image-2", object: "model", created: 0, owned_by: "cloudflare" }]);
+  });
+
+  it("returns an OpenAI error envelope for unknown endpoints", async () => {
+    const env = makeEnv();
+    const response = await worker.fetch(new Request("https://bridge.example/v1/images/edits"), env);
+    const body = await parseJson(response);
+
+    expect(response.status).toBe(404);
     expect(body).toMatchObject({
-      data: [{ b64_json: "aGVsbG8=" }]
+      error: {
+        type: "not_found_error",
+        param: null,
+        code: null
+      }
     });
-    expect((env.AI.run as unknown as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual([
+  });
+});
+
+describe("OpenAI Images API request compatibility", () => {
+  it("returns an OpenAI-compatible image generation response with b64_json by default", async () => {
+    const env = makeEnv();
+    const response = await worker.fetch(postImageGeneration({ model: "gpt-image-2", prompt: "draw a small cube" }), env);
+    const body = await parseJson<{ created: number; data: Array<{ b64_json: string }> }>(response);
+
+    expect(response.status).toBe(200);
+    expect(Number.isInteger(body.created)).toBe(true);
+    expect(body.data).toEqual([{ b64_json: "aGVsbG8=" }]);
+    expect(aiRunMock(env).mock.calls[0]).toEqual(["openai/gpt-image-2", { prompt: "draw a small cube" }]);
+  });
+
+  it("strips public model prefixes and forwards only upstream-supported input fields", async () => {
+    const env = makeEnv({ PUBLIC_MODEL_PREFIX: "cf:" });
+    const requestBody = {
+      model: "cf:gpt-image-2",
+      prompt: "a translucent robot on a desk",
+      size: "1024x1024",
+      quality: "high",
+      background: "transparent",
+      moderation: "auto",
+      output_compression: 72,
+      output_format: "png",
+      partial_images: 2,
+      stream: false,
+      user: "end-user-123"
+    };
+
+    const response = await worker.fetch(postImageGeneration(requestBody), env);
+
+    expect(response.status).toBe(200);
+    expect(aiRunMock(env).mock.calls[0]).toEqual([
       "openai/gpt-image-2",
-      { prompt: "draw a small cube" }
+      {
+        prompt: "a translucent robot on a desk",
+        size: "1024x1024",
+        quality: "high",
+        background: "transparent",
+        output_format: "png"
+      }
     ]);
+  });
+
+  it("uses DEFAULT_IMAGE_MODEL when clients omit model", async () => {
+    const env = makeEnv({ DEFAULT_IMAGE_MODEL: "gpt-image-2" });
+    const response = await worker.fetch(postImageGeneration({ prompt: "use configured default" }), env);
+
+    expect(response.status).toBe(200);
+    expect(aiRunMock(env).mock.calls[0][0]).toBe("openai/gpt-image-2");
+  });
+
+  it("does not double-prefix already Cloudflare-qualified OpenAI model IDs", async () => {
+    const env = makeEnv();
+    const response = await worker.fetch(postImageGeneration({ model: "openai/gpt-image-2", prompt: "qualified" }), env);
+
+    expect(response.status).toBe(200);
+    expect(aiRunMock(env).mock.calls[0][0]).toBe("openai/gpt-image-2");
   });
 
   it("supports n by issuing multiple Cloudflare image requests", async () => {
@@ -46,13 +144,7 @@ describe("cf-aig-bridge", () => {
           .mockResolvedValueOnce({ image: "data:image/png;base64,c2Vjb25k" })
       } as unknown as Ai
     });
-    const request = new Request("https://bridge.example/v1/images/generations", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ prompt: "two variants", n: 2 })
-    });
-
-    const response = await worker.fetch(request, env);
+    const response = await worker.fetch(postImageGeneration({ prompt: "two variants", n: 2 }), env);
     const body = await parseJson(response);
 
     expect(response.status).toBe(200);
@@ -83,27 +175,75 @@ describe("cf-aig-bridge", () => {
     });
   });
 
-  it("extracts Cloudflare gpt-image-2 result.image responses", async () => {
+  it("converts upstream image URLs to b64_json for the default response format", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(PNG_BYTES, { status: 200, headers: { "content-type": "image/png" } }))
+    );
     const env = makeEnv({
       AI: {
-        run: vi.fn(async () => ({ result: { image: "data:image/png;base64,Y2Y=" } }))
+        run: vi.fn(async () => ({ result: { image: "https://imagedelivery.net/generated.png" } }))
       } as unknown as Ai
     });
-    const request = new Request("https://bridge.example/v1/images/generations", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ prompt: "cloudflare wrapped response" })
+
+    const response = await worker.fetch(postImageGeneration({ prompt: "fetch url" }), env);
+    const body = await parseJson(response);
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({ data: [{ b64_json: "iVBORw==" }] });
+    expect(fetch).toHaveBeenCalledWith("https://imagedelivery.net/generated.png");
+  });
+
+  it("extracts OpenAI-style data array items and preserves revised_prompt", async () => {
+    const env = makeEnv({
+      AI: {
+        run: vi.fn(async () => ({
+          data: [{ b64_json: "ZGF0YQ==", revised_prompt: "a revised image prompt" }]
+        }))
+      } as unknown as Ai
     });
 
-    const response = await worker.fetch(request, env);
+    const response = await worker.fetch(postImageGeneration({ prompt: "openai array" }), env);
     const body = await parseJson(response);
 
     expect(response.status).toBe(200);
     expect(body).toMatchObject({
-      data: [{ b64_json: "Y2Y=" }]
+      data: [{ b64_json: "ZGF0YQ==", revised_prompt: "a revised image prompt" }]
     });
   });
 
+  it("preserves OpenAI image generation response metadata returned by upstream", async () => {
+    const env = makeEnv({
+      AI: {
+        run: vi.fn(async () => ({
+          result: {
+            image: "data:image/png;base64,bWV0YQ==",
+            background: "transparent",
+            output_format: "png",
+            quality: "high",
+            size: "1024x1024",
+            usage: { total_tokens: 32 }
+          }
+        }))
+      } as unknown as Ai
+    });
+
+    const response = await worker.fetch(postImageGeneration({ prompt: "metadata" }), env);
+    const body = await parseJson(response);
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({
+      background: "transparent",
+      output_format: "png",
+      quality: "high",
+      size: "1024x1024",
+      usage: { total_tokens: 32 },
+      data: [{ b64_json: "bWV0YQ==" }]
+    });
+  });
+});
+
+describe("OpenAI-style validation and error behavior", () => {
   it("requires the configured bearer token", async () => {
     const env = makeEnv({ BRIDGE_API_KEY: "secret" });
     const request = new Request("https://bridge.example/v1/models");
@@ -117,15 +257,23 @@ describe("cf-aig-bridge", () => {
     });
   });
 
-  it("rejects missing prompts using OpenAI error shape", async () => {
-    const env = makeEnv();
-    const request = new Request("https://bridge.example/v1/images/generations", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model: "gpt-image-2" })
-    });
+  it("accepts the configured bearer token", async () => {
+    const env = makeEnv({ BRIDGE_API_KEY: "secret" });
+    const request = postImageGeneration(
+      { prompt: "authorized" },
+      {
+        headers: { authorization: "Bearer secret" }
+      }
+    );
 
     const response = await worker.fetch(request, env);
+
+    expect(response.status).toBe(200);
+  });
+
+  it("rejects missing prompts using OpenAI error shape", async () => {
+    const env = makeEnv();
+    const response = await worker.fetch(postImageGeneration({ model: "gpt-image-2" }), env);
     const body = await parseJson(response);
 
     expect(response.status).toBe(400);
@@ -133,6 +281,148 @@ describe("cf-aig-bridge", () => {
       error: {
         type: "invalid_request_error",
         param: "prompt"
+      }
+    });
+  });
+
+  it.each([
+    ["n", 0],
+    ["n", 1.5],
+    ["n", 11],
+    ["model", ""],
+    ["size", 1024],
+    ["size", "1792x1024"],
+    ["quality", true],
+    ["quality", "ultra"],
+    ["background", 123],
+    ["background", "white"],
+    ["moderation", "strict"],
+    ["output_compression", "80"],
+    ["output_compression", 101],
+    ["output_compression", 12.5],
+    ["output_format", "gif"],
+    ["partial_images", "2"],
+    ["partial_images", 4],
+    ["partial_images", 1.5],
+    ["stream", "false"],
+    ["stream", true],
+    ["style", "vivid"],
+    ["user", 123],
+    ["response_format", "json"]
+  ])("rejects invalid %s values", async (param, value) => {
+    const env = makeEnv();
+    const response = await worker.fetch(postImageGeneration({ prompt: "invalid", [param]: value }), env);
+    const body = await parseJson(response);
+
+    expect(response.status).toBe(400);
+    expect(body).toMatchObject({
+      error: {
+        type: "invalid_request_error",
+        param
+      }
+    });
+    expect(env.AI.run).not.toHaveBeenCalled();
+  });
+
+  it("rejects non-JSON content before calling upstream", async () => {
+    const env = makeEnv();
+    const request = new Request("https://bridge.example/v1/images/generations", {
+      method: "POST",
+      headers: { "content-type": "text/plain" },
+      body: "prompt=hello"
+    });
+
+    const response = await worker.fetch(request, env);
+    const body = await parseJson(response);
+
+    expect(response.status).toBe(400);
+    expect(body).toMatchObject({ error: { type: "invalid_request_error" } });
+    expect(env.AI.run).not.toHaveBeenCalled();
+  });
+
+  it("rejects invalid JSON before calling upstream", async () => {
+    const env = makeEnv();
+    const request = new Request("https://bridge.example/v1/images/generations", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{"
+    });
+
+    const response = await worker.fetch(request, env);
+    const body = await parseJson(response);
+
+    expect(response.status).toBe(400);
+    expect(body).toMatchObject({ error: { type: "invalid_request_error" } });
+    expect(env.AI.run).not.toHaveBeenCalled();
+  });
+
+  it("rejects non-POST image generation requests", async () => {
+    const env = makeEnv();
+    const response = await worker.fetch(new Request("https://bridge.example/v1/images/generations"), env);
+    const body = await parseJson(response);
+
+    expect(response.status).toBe(405);
+    expect(body).toMatchObject({ error: { type: "invalid_request_error" } });
+    expect(env.AI.run).not.toHaveBeenCalled();
+  });
+
+  it("maps upstream AI failures to OpenAI-style upstream errors", async () => {
+    const env = makeEnv({
+      AI: {
+        run: vi.fn(async () => {
+          throw new Error("Cloudflare rejected the request");
+        })
+      } as unknown as Ai
+    });
+
+    const response = await worker.fetch(postImageGeneration({ prompt: "upstream fails" }), env);
+    const body = await parseJson(response);
+
+    expect(response.status).toBe(502);
+    expect(body).toMatchObject({
+      error: {
+        message: "Cloudflare rejected the request",
+        type: "upstream_error",
+        param: null,
+        code: null
+      }
+    });
+  });
+
+  it("fails clearly when upstream returns no image payload", async () => {
+    const env = makeEnv({
+      AI: {
+        run: vi.fn(async () => ({ result: {} }))
+      } as unknown as Ai
+    });
+
+    const response = await worker.fetch(postImageGeneration({ prompt: "empty upstream" }), env);
+    const body = await parseJson(response);
+
+    expect(response.status).toBe(502);
+    expect(body).toMatchObject({
+      error: {
+        type: "upstream_error"
+      }
+    });
+  });
+
+  it("maps failed image URL fetches to upstream errors", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("not found", { status: 404 })));
+    const env = makeEnv({
+      AI: {
+        run: vi.fn(async () => ({ image: "https://imagedelivery.net/missing.png" }))
+      } as unknown as Ai
+    });
+
+    const response = await worker.fetch(postImageGeneration({ prompt: "missing url" }), env);
+    const body = await parseJson(response);
+
+    expect(response.status).toBe(502);
+    expect(body).toMatchObject({
+      error: {
+        message: "Failed to fetch generated image URL: HTTP 404",
+        type: "upstream_error"
       }
     });
   });
