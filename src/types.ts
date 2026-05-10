@@ -19,6 +19,7 @@ export interface OpenAIImageGenerationRequest {
   output_compression?: unknown;
   output_format?: unknown;
   partial_images?: unknown;
+  stream?: unknown;
   [key: string]: unknown;
 }
 
@@ -30,18 +31,41 @@ export interface OpenAIImageData {
 
 export interface OpenAIImagesResponse {
   created: number;
+  background?: string;
   data: OpenAIImageData[];
+  output_format?: string;
+  quality?: string;
+  size?: string;
+  usage?: unknown;
+}
+
+export interface OpenAIImagesResponseMetadata {
+  background?: string;
+  output_format?: string;
+  quality?: string;
+  size?: string;
+  usage?: unknown;
 }
 
 export interface CloudflareAiImageResult {
   image?: string;
   url?: string;
   b64_json?: string;
+  background?: string;
+  output_format?: string;
+  quality?: string;
+  size?: string;
+  usage?: unknown;
   result?: {
     image?: string;
     url?: string;
     b64_json?: string;
+    background?: string;
+    output_format?: string;
+    quality?: string;
+    size?: string;
+    usage?: unknown;
   };
-  data?: Array<{ url?: string; b64_json?: string; image?: string }>;
+  data?: Array<{ url?: string; b64_json?: string; image?: string; revised_prompt?: string }>;
   [key: string]: unknown;
 }
