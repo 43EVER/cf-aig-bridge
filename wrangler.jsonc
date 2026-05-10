@@ -1,0 +1,14 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cf-aig-bridge",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-09-06",
+  "compatibility_flags": ["nodejs_compat"],
+  "ai": {
+    "binding": "AI"
+  },
+  "vars": {
+    "DEFAULT_IMAGE_MODEL": "gpt-image-2",
+    "PUBLIC_MODEL_PREFIX": ""
+  }
+}
