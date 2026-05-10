@@ -40,7 +40,9 @@ Supported behavior:
 - `model: "gpt-image-2"` maps to Cloudflare `openai/gpt-image-2`.
 - `n` is implemented by issuing one Cloudflare image request per requested image.
 - `response_format` supports `b64_json` and `url`; default is `b64_json`.
-- `size`, `quality`, `style`, `background`, `moderation`, `output_compression`, `output_format`, and `partial_images` are forwarded when present.
+- `size`, `quality`, `background`, and `output_format` are forwarded when present.
+- OpenAI client-only parameters such as `moderation`, `output_compression`, `partial_images`, and `user` are validated but not forwarded to Cloudflare.
+- `style` is rejected because it is DALL-E-specific and not supported by Cloudflare `gpt-image-2`.
 
 ### `POST /v1/images/edits`
 
@@ -62,12 +64,18 @@ JSON request example:
 }
 ```
 
-Multipart form requests using `image` or `image[]` file fields are also accepted for OpenAI SDK compatibility. The bridge base64-encodes uploaded files before calling Cloudflare.
+Multipart form requests using `image` or `image[]` file fields are also accepted for OpenAI SDK compatibility. The bridge base64-encodes uploaded files before calling Cloudflare. JSON `image_url` values may be data URLs/base64 strings or HTTP(S) URLs; HTTP(S) inputs are fetched by the Worker and converted to data URLs before calling Cloudflare.
 
 Unsupported edit behavior:
 
 - `mask` is rejected because Cloudflare `openai/gpt-image-2` does not expose a mask parameter.
 - `file_id` image references are rejected because the bridge does not implement OpenAI Files API storage.
+
+### `POST /v1/images/variations`
+
+OpenAI's image variations endpoint is DALL-E-2-specific. This bridge still exposes the endpoint for OpenAI Images API clients by adapting it to a `gpt-image-2` image edit request with a fixed variation prompt.
+
+Multipart `image` and `image[]` fields are accepted, as are JSON `image` / `images` values. The endpoint returns `url` responses by default, matching OpenAI's legacy variations behavior; pass `response_format: "b64_json"` for base64 JSON output.
 
 ### `GET /v1/models`
 
@@ -117,3 +125,5 @@ curl -sS http://127.0.0.1:8787/v1/images/generations \
 
 - Cloudflare Workers AI OpenAI `gpt-image-2`: https://developers.cloudflare.com/ai/models/openai/gpt-image-2/
 - OpenAI Images API generate method: https://developers.openai.com/api/reference/resources/images/methods/generate
+- OpenAI Images API edit method: https://developers.openai.com/api/reference/resources/images/methods/edit
+- OpenAI Images API variations method: https://developers.openai.com/api/reference/resources/images/methods/create_variation

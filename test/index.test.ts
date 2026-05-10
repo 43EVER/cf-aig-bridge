@@ -73,7 +73,7 @@ describe("OpenAI-compatible endpoint routing", () => {
 
   it("returns an OpenAI error envelope for unknown endpoints", async () => {
     const env = makeEnv();
-    const response = await worker.fetch(new Request("https://bridge.example/v1/images/variations"), env);
+    const response = await worker.fetch(new Request("https://bridge.example/v1/images/unknown"), env);
     const body = await parseJson(response);
 
     expect(response.status).toBe(404);
@@ -302,6 +302,25 @@ describe("OpenAI Images Edit API request compatibility", () => {
     });
   });
 
+  it("fetches JSON image_url inputs before calling Cloudflare", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(PNG_BYTES, { status: 200, headers: { "content-type": "image/png" } }))
+    );
+    const env = makeEnv();
+    const response = await worker.fetch(
+      postImageEdit({ prompt: "edit remote image", images: [{ image_url: "https://cdn.example/input.png" }] }),
+      env
+    );
+
+    expect(response.status).toBe(200);
+    expect(fetch).toHaveBeenCalledWith("https://cdn.example/input.png");
+    expect(aiRunMock(env).mock.calls[0][1]).toMatchObject({
+      prompt: "edit remote image",
+      images: ["data:image/png;base64,iVBORw=="]
+    });
+  });
+
   it("accepts multipart image files using OpenAI image[] form fields", async () => {
     const env = makeEnv();
     const form = new FormData();
@@ -376,6 +395,52 @@ describe("OpenAI Images Edit API request compatibility", () => {
         param: "mask"
       }
     });
+    expect(env.AI.run).not.toHaveBeenCalled();
+  });
+});
+
+describe("OpenAI Images Variation API request compatibility", () => {
+  it("adapts image variations to Cloudflare gpt-image-2 edits", async () => {
+    const env = makeEnv();
+    const form = new FormData();
+    form.append("image", new File([PNG_BYTES], "input.png", { type: "image/png" }));
+    form.set("n", "2");
+
+    const response = await worker.fetch(
+      new Request("https://bridge.example/v1/images/variations", {
+        method: "POST",
+        body: form
+      }),
+      env
+    );
+    const body = await parseJson(response);
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({
+      data: [{ url: "data:image/png;base64,aGVsbG8=" }, { url: "data:image/png;base64,aGVsbG8=" }]
+    });
+    expect(env.AI.run).toHaveBeenCalledTimes(2);
+    expect(aiRunMock(env).mock.calls[0]).toEqual([
+      "openai/gpt-image-2",
+      {
+        prompt: "Create a natural variation of the provided image while preserving its main subject and overall composition.",
+        images: ["iVBORw=="]
+      }
+    ]);
+  });
+
+  it("rejects image variations without an image", async () => {
+    const env = makeEnv();
+    const response = await worker.fetch(
+      new Request("https://bridge.example/v1/images/variations", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({})
+      }),
+      env
+    );
+
+    expect(response.status).toBe(400);
     expect(env.AI.run).not.toHaveBeenCalled();
   });
 });

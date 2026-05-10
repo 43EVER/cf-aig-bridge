@@ -6,13 +6,17 @@ import type {
   OpenAIImageData,
   OpenAIImageGenerationRequest,
   OpenAIImageInput,
+  OpenAIImageVariationRequest,
   OpenAIImagesResponse,
   OpenAIImagesResponseMetadata
 } from "./types";
 
 const OPENAI_IMAGE_GENERATION_PATH = "/v1/images/generations";
 const OPENAI_IMAGE_EDIT_PATH = "/v1/images/edits";
+const OPENAI_IMAGE_VARIATION_PATH = "/v1/images/variations";
 const CLOUDFLARE_OPENAI_MODEL_PREFIX = "openai/";
+const VARIATION_PROMPT =
+  "Create a natural variation of the provided image while preserving its main subject and overall composition.";
 const SUPPORTED_RESPONSE_FORMATS = new Set(["b64_json", "url"]);
 const SUPPORTED_BACKGROUND_VALUES = new Set(["transparent", "opaque", "auto"]);
 const SUPPORTED_MODERATION_VALUES = new Set(["low", "auto"]);
@@ -27,6 +31,10 @@ export function isImagesGenerationsPath(pathname: string): boolean {
 
 export function isImagesEditsPath(pathname: string): boolean {
   return pathname === OPENAI_IMAGE_EDIT_PATH || pathname === "/images/edits";
+}
+
+export function isImagesVariationsPath(pathname: string): boolean {
+  return pathname === OPENAI_IMAGE_VARIATION_PATH || pathname === "/images/variations";
 }
 
 export async function handleImageGeneration(request: Request, env: Env): Promise<Response> {
@@ -63,6 +71,22 @@ export async function handleImageEdit(request: Request, env: Env): Promise<Respo
   const cloudflareModel = toCloudflareOpenAIModel(requestedModel, env.PUBLIC_MODEL_PREFIX ?? "");
 
   return await runOpenAIImagesRequest(env, cloudflareModel, body, prompt, n, responseFormat, images);
+}
+
+export async function handleImageVariation(request: Request, env: Env): Promise<Response> {
+  if (request.method !== "POST") {
+    throw new HttpError(405, "Method not allowed", "invalid_request_error");
+  }
+
+  const body = await readRequestBody<OpenAIImageVariationRequest>(request);
+  validateClientOnlyParams(body);
+  const images = await readEditImages(body);
+  const n = readOptionalIntegerInRange(body.n, "n", 1, 1, 10);
+  const responseFormat = readResponseFormat(body.response_format, "url");
+  const requestedModel = readOptionalString(body.model, "model") ?? env.DEFAULT_IMAGE_MODEL ?? "gpt-image-2";
+  const cloudflareModel = toCloudflareOpenAIModel(requestedModel, env.PUBLIC_MODEL_PREFIX ?? "");
+
+  return await runOpenAIImagesRequest(env, cloudflareModel, body, VARIATION_PROMPT, n, responseFormat, images);
 }
 
 async function runOpenAIImagesRequest(
@@ -258,9 +282,9 @@ function rejectUnsupportedMask(value: unknown): void {
   );
 }
 
-function readResponseFormat(value: unknown): "b64_json" | "url" {
+function readResponseFormat(value: unknown, defaultValue: "b64_json" | "url" = "b64_json"): "b64_json" | "url" {
   if (value === undefined || value === null) {
-    return "b64_json";
+    return defaultValue;
   }
 
   if (typeof value !== "string" || !SUPPORTED_RESPONSE_FORMATS.has(value)) {
@@ -350,6 +374,10 @@ async function readEditImage(value: unknown, param: string): Promise<string> {
       throw new HttpError(400, `Invalid parameter: ${param} must not be empty`, "invalid_request_error", "image");
     }
 
+    if (isHttpUrl(image)) {
+      return await fetchInputImageUrl(image, param);
+    }
+
     return image;
   }
 
@@ -368,6 +396,28 @@ async function readEditImage(value: unknown, param: string): Promise<string> {
   }
 
   throw new HttpError(400, `Invalid parameter: ${param} must be an image`, "invalid_request_error", "image");
+}
+
+async function fetchInputImageUrl(url: string, param: string): Promise<string> {
+  let response: Response;
+  try {
+    response = await fetch(url);
+  } catch {
+    throw new HttpError(400, `Failed to fetch input image URL for ${param}`, "invalid_request_error", "image");
+  }
+
+  if (!response.ok) {
+    throw new HttpError(
+      400,
+      `Failed to fetch input image URL for ${param}: HTTP ${response.status}`,
+      "invalid_request_error",
+      "image"
+    );
+  }
+
+  const contentType = response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
+  const mimeType = contentType?.startsWith("image/") ? contentType : "image/png";
+  return `data:${mimeType};base64,${arrayBufferToBase64(await response.arrayBuffer())}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

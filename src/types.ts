@@ -29,6 +29,8 @@ export interface OpenAIImageEditRequest extends OpenAIImageGenerationRequest {
   mask?: unknown;
 }
 
+export interface OpenAIImageVariationRequest extends OpenAIImageEditRequest {}
+
 export interface OpenAIImageInput {
   image_url?: unknown;
   file_id?: unknown;
