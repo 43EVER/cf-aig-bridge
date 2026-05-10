@@ -23,6 +23,18 @@ export interface OpenAIImageGenerationRequest {
   [key: string]: unknown;
 }
 
+export interface OpenAIImageEditRequest extends OpenAIImageGenerationRequest {
+  image?: unknown;
+  images?: unknown;
+  mask?: unknown;
+}
+
+export interface OpenAIImageInput {
+  image_url?: unknown;
+  file_id?: unknown;
+  [key: string]: unknown;
+}
+
 export interface OpenAIImageData {
   b64_json?: string;
   url?: string;

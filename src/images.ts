@@ -2,13 +2,16 @@ import { HttpError } from "./errors";
 import type {
   CloudflareAiImageResult,
   Env,
+  OpenAIImageEditRequest,
   OpenAIImageData,
   OpenAIImageGenerationRequest,
+  OpenAIImageInput,
   OpenAIImagesResponse,
   OpenAIImagesResponseMetadata
 } from "./types";
 
-const OPENAI_IMAGE_PATH = "/v1/images/generations";
+const OPENAI_IMAGE_GENERATION_PATH = "/v1/images/generations";
+const OPENAI_IMAGE_EDIT_PATH = "/v1/images/edits";
 const CLOUDFLARE_OPENAI_MODEL_PREFIX = "openai/";
 const SUPPORTED_RESPONSE_FORMATS = new Set(["b64_json", "url"]);
 const SUPPORTED_BACKGROUND_VALUES = new Set(["transparent", "opaque", "auto"]);
@@ -16,9 +19,14 @@ const SUPPORTED_MODERATION_VALUES = new Set(["low", "auto"]);
 const SUPPORTED_OUTPUT_FORMAT_VALUES = new Set(["png", "webp", "jpeg"]);
 const SUPPORTED_QUALITY_VALUES = new Set(["low", "medium", "high", "auto"]);
 const SUPPORTED_SIZE_VALUES = new Set(["1024x1024", "1024x1536", "1536x1024", "auto"]);
+type MultipartValue = File | string;
 
 export function isImagesGenerationsPath(pathname: string): boolean {
-  return pathname === OPENAI_IMAGE_PATH || pathname === "/images/generations";
+  return pathname === OPENAI_IMAGE_GENERATION_PATH || pathname === "/images/generations";
+}
+
+export function isImagesEditsPath(pathname: string): boolean {
+  return pathname === OPENAI_IMAGE_EDIT_PATH || pathname === "/images/edits";
 }
 
 export async function handleImageGeneration(request: Request, env: Env): Promise<Response> {
@@ -26,7 +34,7 @@ export async function handleImageGeneration(request: Request, env: Env): Promise
     throw new HttpError(405, "Method not allowed", "invalid_request_error");
   }
 
-  const body = await readJson<OpenAIImageGenerationRequest>(request);
+  const body = await readRequestBody<OpenAIImageGenerationRequest>(request);
   rejectUnsupportedStreaming(body.stream);
   validateClientOnlyParams(body);
   const prompt = readRequiredString(body.prompt, "prompt");
@@ -35,10 +43,41 @@ export async function handleImageGeneration(request: Request, env: Env): Promise
   const requestedModel = readOptionalString(body.model, "model") ?? env.DEFAULT_IMAGE_MODEL ?? "gpt-image-2";
   const cloudflareModel = toCloudflareOpenAIModel(requestedModel, env.PUBLIC_MODEL_PREFIX ?? "");
 
+  return await runOpenAIImagesRequest(env, cloudflareModel, body, prompt, n, responseFormat, []);
+}
+
+export async function handleImageEdit(request: Request, env: Env): Promise<Response> {
+  if (request.method !== "POST") {
+    throw new HttpError(405, "Method not allowed", "invalid_request_error");
+  }
+
+  const body = await readRequestBody<OpenAIImageEditRequest>(request);
+  rejectUnsupportedStreaming(body.stream);
+  rejectUnsupportedMask(body.mask);
+  validateClientOnlyParams(body);
+  const prompt = readRequiredString(body.prompt, "prompt");
+  const images = await readEditImages(body);
+  const n = readOptionalIntegerInRange(body.n, "n", 1, 1, 10);
+  const responseFormat = readResponseFormat(body.response_format);
+  const requestedModel = readOptionalString(body.model, "model") ?? env.DEFAULT_IMAGE_MODEL ?? "gpt-image-2";
+  const cloudflareModel = toCloudflareOpenAIModel(requestedModel, env.PUBLIC_MODEL_PREFIX ?? "");
+
+  return await runOpenAIImagesRequest(env, cloudflareModel, body, prompt, n, responseFormat, images);
+}
+
+async function runOpenAIImagesRequest(
+  env: Env,
+  cloudflareModel: string,
+  body: OpenAIImageGenerationRequest,
+  prompt: string,
+  n: number,
+  responseFormat: "b64_json" | "url",
+  images: string[]
+): Promise<Response> {
   const data: OpenAIImageData[] = [];
   let metadata: OpenAIImagesResponseMetadata = {};
   for (let index = 0; index < n; index += 1) {
-    const cfResult = await runCloudflareImageModel(env, cloudflareModel, buildCloudflareInput(body, prompt));
+    const cfResult = await runCloudflareImageModel(env, cloudflareModel, buildCloudflareInput(body, prompt, images));
     const firstImage = extractFirstImage(cfResult);
     metadata = { ...metadata, ...extractResponseMetadata(cfResult) };
 
@@ -67,6 +106,15 @@ export async function handleImageGeneration(request: Request, env: Env): Promise
   });
 }
 
+async function readRequestBody<T>(request: Request): Promise<T> {
+  const contentType = request.headers.get("content-type") ?? "";
+  if (contentType.toLowerCase().includes("multipart/form-data")) {
+    return (await readMultipart(request)) as T;
+  }
+
+  return await readJson<T>(request);
+}
+
 async function readJson<T>(request: Request): Promise<T> {
   const contentType = request.headers.get("content-type") ?? "";
   if (contentType && !contentType.toLowerCase().includes("application/json")) {
@@ -78,6 +126,68 @@ async function readJson<T>(request: Request): Promise<T> {
   } catch {
     throw new HttpError(400, "Invalid JSON request body", "invalid_request_error");
   }
+}
+
+async function readMultipart(request: Request): Promise<Record<string, unknown>> {
+  let formData: FormData;
+  try {
+    formData = await request.formData();
+  } catch {
+    throw new HttpError(400, "Invalid multipart/form-data request body", "invalid_request_error");
+  }
+
+  const body: Record<string, unknown> = {};
+  const images: unknown[] = [];
+  for (const [key, value] of formData.entries()) {
+    const normalizedKey = key.endsWith("[]") ? key.slice(0, -2) : key;
+    if (normalizedKey === "image") {
+      images.push(await multipartValueToImage(value, "image"));
+      continue;
+    }
+
+    body[normalizedKey] = parseMultipartScalar(value, normalizedKey);
+  }
+
+  if (images.length > 0) {
+    body.images = images.map((image) => ({ image_url: image }));
+  }
+
+  return body;
+}
+
+async function multipartValueToImage(value: MultipartValue, param: string): Promise<string> {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      throw new HttpError(400, `Invalid parameter: ${param} must not be empty`, "invalid_request_error", param);
+    }
+
+    return trimmed;
+  }
+
+  return await blobToBase64(value);
+}
+
+function parseMultipartScalar(value: MultipartValue, key: string): unknown {
+  if (typeof value !== "string") {
+    throw new HttpError(400, `Invalid parameter: ${key} must be a string`, "invalid_request_error", key);
+  }
+
+  if (key === "n" || key === "partial_images" || key === "output_compression") {
+    const parsed = Number(value);
+    return Number.isNaN(parsed) ? value : parsed;
+  }
+
+  if (key === "stream") {
+    if (value === "true") {
+      return true;
+    }
+    if (value === "false") {
+      return false;
+    }
+  }
+
+  return value;
 }
 
 function readRequiredString(value: unknown, param: string): string {
@@ -135,6 +245,19 @@ function rejectUnsupportedStreaming(value: unknown): void {
   throw new HttpError(400, "Invalid parameter: stream must be a boolean", "invalid_request_error", "stream");
 }
 
+function rejectUnsupportedMask(value: unknown): void {
+  if (value === undefined || value === null) {
+    return;
+  }
+
+  throw new HttpError(
+    400,
+    "Invalid parameter: mask is not supported by Cloudflare gpt-image-2",
+    "invalid_request_error",
+    "mask"
+  );
+}
+
 function readResponseFormat(value: unknown): "b64_json" | "url" {
   if (value === undefined || value === null) {
     return "b64_json";
@@ -167,8 +290,11 @@ export function toCloudflareOpenAIModel(model: string, publicModelPrefix: string
   return `${CLOUDFLARE_OPENAI_MODEL_PREFIX}${normalizedModel}`;
 }
 
-function buildCloudflareInput(body: OpenAIImageGenerationRequest, prompt: string): Record<string, unknown> {
+function buildCloudflareInput(body: OpenAIImageGenerationRequest, prompt: string, images: string[] = []): Record<string, unknown> {
   const input: Record<string, unknown> = { prompt };
+  if (images.length > 0) {
+    input.images = images;
+  }
   copyStringEnumParam(body, input, "size", SUPPORTED_SIZE_VALUES);
   copyStringEnumParam(body, input, "quality", SUPPORTED_QUALITY_VALUES);
   copyStringEnumParam(body, input, "background", SUPPORTED_BACKGROUND_VALUES);
@@ -190,6 +316,62 @@ function validateClientOnlyParams(body: OpenAIImageGenerationRequest): void {
       "style"
     );
   }
+}
+
+async function readEditImages(body: OpenAIImageEditRequest): Promise<string[]> {
+  const rawImages = normalizeEditImages(body);
+  if (rawImages.length < 1 || rawImages.length > 16) {
+    throw new HttpError(400, "Invalid parameter: image must contain between 1 and 16 images", "invalid_request_error", "image");
+  }
+
+  return await Promise.all(rawImages.map((image, index) => readEditImage(image, `image[${index}]`)));
+}
+
+function normalizeEditImages(body: OpenAIImageEditRequest): unknown[] {
+  if (body.images !== undefined && body.images !== null) {
+    return Array.isArray(body.images) ? body.images : [body.images];
+  }
+
+  if (body.image !== undefined && body.image !== null) {
+    return Array.isArray(body.image) ? body.image : [body.image];
+  }
+
+  throw new HttpError(400, "Missing required parameter: image", "invalid_request_error", "image");
+}
+
+async function readEditImage(value: unknown, param: string): Promise<string> {
+  if (value instanceof Blob) {
+    return await blobToBase64(value);
+  }
+
+  if (typeof value === "string") {
+    const image = value.trim();
+    if (!image) {
+      throw new HttpError(400, `Invalid parameter: ${param} must not be empty`, "invalid_request_error", "image");
+    }
+
+    return image;
+  }
+
+  if (isRecord(value)) {
+    const input = value as OpenAIImageInput;
+    if (input.file_id !== undefined && input.file_id !== null) {
+      throw new HttpError(
+        400,
+        "Invalid parameter: file_id images are not supported by this bridge",
+        "invalid_request_error",
+        "image"
+      );
+    }
+
+    return await readEditImage(input.image_url, `${param}.image_url`);
+  }
+
+  throw new HttpError(400, `Invalid parameter: ${param} must be an image`, "invalid_request_error", "image");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 function copyStringEnumParam(
@@ -380,4 +562,8 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
   }
 
   return btoa(binary);
+}
+
+async function blobToBase64(blob: Blob): Promise<string> {
+  return arrayBufferToBase64(await blob.arrayBuffer());
 }

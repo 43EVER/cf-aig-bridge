@@ -42,6 +42,33 @@ Supported behavior:
 - `response_format` supports `b64_json` and `url`; default is `b64_json`.
 - `size`, `quality`, `style`, `background`, `moderation`, `output_compression`, `output_format`, and `partial_images` are forwarded when present.
 
+### `POST /v1/images/edits`
+
+Accepts OpenAI-style image edit requests and maps them to Cloudflare `openai/gpt-image-2` by passing input images through the model's `images` array.
+
+JSON request example:
+
+```json
+{
+  "model": "gpt-image-2",
+  "prompt": "turn this sketch into a realistic product photo",
+  "images": [
+    {
+      "image_url": "data:image/png;base64,..."
+    }
+  ],
+  "size": "1024x1024",
+  "response_format": "b64_json"
+}
+```
+
+Multipart form requests using `image` or `image[]` file fields are also accepted for OpenAI SDK compatibility. The bridge base64-encodes uploaded files before calling Cloudflare.
+
+Unsupported edit behavior:
+
+- `mask` is rejected because Cloudflare `openai/gpt-image-2` does not expose a mask parameter.
+- `file_id` image references are rejected because the bridge does not implement OpenAI Files API storage.
+
 ### `GET /v1/models`
 
 Returns a minimal OpenAI-compatible model list for client discovery.

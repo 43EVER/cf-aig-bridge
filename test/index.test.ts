@@ -24,6 +24,17 @@ function postImageGeneration(body: Record<string, unknown>, init: RequestInit = 
   });
 }
 
+function postImageEdit(body: Record<string, unknown>, init: RequestInit = {}): Request {
+  return new Request("https://bridge.example/v1/images/edits", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      ...init.headers
+    },
+    body: JSON.stringify(body)
+  });
+}
+
 async function parseJson<T = Record<string, unknown>>(response: Response): Promise<T> {
   return (await response.json()) as T;
 }
@@ -62,7 +73,7 @@ describe("OpenAI-compatible endpoint routing", () => {
 
   it("returns an OpenAI error envelope for unknown endpoints", async () => {
     const env = makeEnv();
-    const response = await worker.fetch(new Request("https://bridge.example/v1/images/edits"), env);
+    const response = await worker.fetch(new Request("https://bridge.example/v1/images/variations"), env);
     const body = await parseJson(response);
 
     expect(response.status).toBe(404);
@@ -240,6 +251,132 @@ describe("OpenAI Images API request compatibility", () => {
       usage: { total_tokens: 32 },
       data: [{ b64_json: "bWV0YQ==" }]
     });
+  });
+});
+
+describe("OpenAI Images Edit API request compatibility", () => {
+  it("adapts JSON image_url edits to Cloudflare gpt-image-2 images input", async () => {
+    const env = makeEnv({
+      AI: {
+        run: vi.fn(async () => ({ result: { image: "data:image/png;base64,ZWRpdA==" } }))
+      } as unknown as Ai
+    });
+    const response = await worker.fetch(
+      postImageEdit({
+        model: "gpt-image-2",
+        prompt: "turn it into a clay sculpture",
+        images: [{ image_url: "data:image/png;base64,aW5wdXQ=" }],
+        size: "1024x1024",
+        quality: "medium",
+        output_format: "png"
+      }),
+      env
+    );
+    const body = await parseJson(response);
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({ data: [{ b64_json: "ZWRpdA==" }] });
+    expect(aiRunMock(env).mock.calls[0]).toEqual([
+      "openai/gpt-image-2",
+      {
+        prompt: "turn it into a clay sculpture",
+        images: ["data:image/png;base64,aW5wdXQ="],
+        size: "1024x1024",
+        quality: "medium",
+        output_format: "png"
+      }
+    ]);
+  });
+
+  it("accepts a single JSON image string for OpenAI SDK compatibility", async () => {
+    const env = makeEnv();
+    const response = await worker.fetch(
+      postImageEdit({ prompt: "edit the image", image: "data:image/png;base64,aW1n" }),
+      env
+    );
+
+    expect(response.status).toBe(200);
+    expect(aiRunMock(env).mock.calls[0][1]).toMatchObject({
+      prompt: "edit the image",
+      images: ["data:image/png;base64,aW1n"]
+    });
+  });
+
+  it("accepts multipart image files using OpenAI image[] form fields", async () => {
+    const env = makeEnv();
+    const form = new FormData();
+    form.set("prompt", "multipart edit");
+    form.append("image[]", new File([PNG_BYTES], "input.png", { type: "image/png" }));
+    form.set("size", "1024x1536");
+    form.set("response_format", "url");
+
+    const response = await worker.fetch(
+      new Request("https://bridge.example/images/edits", {
+        method: "POST",
+        body: form
+      }),
+      env
+    );
+    const body = await parseJson(response);
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({ data: [{ url: "data:image/png;base64,aGVsbG8=" }] });
+    expect(aiRunMock(env).mock.calls[0]).toEqual([
+      "openai/gpt-image-2",
+      {
+        prompt: "multipart edit",
+        images: ["iVBORw=="],
+        size: "1024x1536"
+      }
+    ]);
+  });
+
+  it("rejects image edits without an image", async () => {
+    const env = makeEnv();
+    const response = await worker.fetch(postImageEdit({ prompt: "missing image" }), env);
+    const body = await parseJson(response);
+
+    expect(response.status).toBe(400);
+    expect(body).toMatchObject({
+      error: {
+        type: "invalid_request_error",
+        param: "image"
+      }
+    });
+    expect(env.AI.run).not.toHaveBeenCalled();
+  });
+
+  it("rejects file_id image edits because the bridge has no OpenAI Files API backing", async () => {
+    const env = makeEnv();
+    const response = await worker.fetch(postImageEdit({ prompt: "file id", images: [{ file_id: "file-abc" }] }), env);
+    const body = await parseJson(response);
+
+    expect(response.status).toBe(400);
+    expect(body).toMatchObject({
+      error: {
+        type: "invalid_request_error",
+        param: "image"
+      }
+    });
+    expect(env.AI.run).not.toHaveBeenCalled();
+  });
+
+  it("rejects masks because Cloudflare gpt-image-2 does not expose a mask parameter", async () => {
+    const env = makeEnv();
+    const response = await worker.fetch(
+      postImageEdit({ prompt: "masked edit", image: "data:image/png;base64,aW1n", mask: "data:image/png;base64,bWFzaw==" }),
+      env
+    );
+    const body = await parseJson(response);
+
+    expect(response.status).toBe(400);
+    expect(body).toMatchObject({
+      error: {
+        type: "invalid_request_error",
+        param: "mask"
+      }
+    });
+    expect(env.AI.run).not.toHaveBeenCalled();
   });
 });
 

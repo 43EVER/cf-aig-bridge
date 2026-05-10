@@ -1,5 +1,5 @@
 import { HttpError, jsonResponse, openAIErrorResponse } from "./errors";
-import { handleImageGeneration, isImagesGenerationsPath } from "./images";
+import { handleImageEdit, handleImageGeneration, isImagesEditsPath, isImagesGenerationsPath } from "./images";
 import { handleModels } from "./models";
 import type { Env } from "./types";
 
@@ -21,6 +21,10 @@ export default {
 
       if (isImagesGenerationsPath(url.pathname)) {
         return await handleImageGeneration(request, env);
+      }
+
+      if (isImagesEditsPath(url.pathname)) {
+        return await handleImageEdit(request, env);
       }
 
       throw new HttpError(404, `No route for ${url.pathname}`, "not_found_error");
