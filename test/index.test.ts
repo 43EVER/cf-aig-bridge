@@ -148,6 +148,34 @@ describe("OpenAI Images API request compatibility", () => {
     expect(aiRunMock(env).mock.calls[0][2]).toEqual({ gateway: { id: "images-prod" } });
   });
 
+  it("forwards gpt-image-1.5 style and omits gpt-image-2-only output fields", async () => {
+    const env = makeEnv();
+    const response = await worker.fetch(
+      postImageGeneration({
+        model: "gpt-image-1.5",
+        prompt: "draw a styled cube",
+        quality: "low",
+        size: "1024x1024",
+        style: "natural",
+        background: "transparent",
+        output_format: "png"
+      }),
+      env
+    );
+
+    expect(response.status).toBe(200);
+    expect(aiRunMock(env).mock.calls[0]).toEqual([
+      "openai/gpt-image-1.5",
+      {
+        prompt: "draw a styled cube",
+        size: "1024x1024",
+        quality: "low",
+        style: "natural"
+      },
+      defaultGatewayOptions()
+    ]);
+  });
+
   it("uses DEFAULT_IMAGE_MODEL when clients omit model", async () => {
     const env = makeEnv({ DEFAULT_IMAGE_MODEL: "gpt-image-2" });
     const response = await worker.fetch(postImageGeneration({ prompt: "use configured default" }), env);

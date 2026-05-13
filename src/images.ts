@@ -24,6 +24,8 @@ const SUPPORTED_OUTPUT_FORMAT_VALUES = new Set(["png", "webp", "jpeg"]);
 const SUPPORTED_QUALITY_VALUES = new Set(["low", "medium", "high", "auto"]);
 const SUPPORTED_SIZE_VALUES = new Set(["1024x1024", "1024x1536", "1536x1024", "auto"]);
 const SUPPORTED_INPUT_FIDELITY_VALUES = new Set(["low", "high"]);
+const SUPPORTED_STYLE_VALUES = new Set(["vivid", "natural"]);
+const GPT_IMAGE_1_5_MODEL = "openai/gpt-image-1.5";
 type MultipartValue = File | string;
 
 export function isImagesGenerationsPath(pathname: string): boolean {
@@ -45,12 +47,12 @@ export async function handleImageGeneration(request: Request, env: Env): Promise
 
   const body = await readRequestBody<OpenAIImageGenerationRequest>(request);
   rejectUnsupportedStreaming(body.stream);
-  validateClientOnlyParams(body);
   const prompt = readRequiredString(body.prompt, "prompt");
   const n = readOptionalIntegerInRange(body.n, "n", 1, 1, 10);
   const responseFormat = readResponseFormat(body.response_format);
   const requestedModel = readOptionalString(body.model, "model") ?? env.DEFAULT_IMAGE_MODEL ?? "gpt-image-2";
   const cloudflareModel = toCloudflareOpenAIModel(requestedModel, env.PUBLIC_MODEL_PREFIX ?? "");
+  validateClientOnlyParams(body, cloudflareModel);
 
   return await runOpenAIImagesRequest(env, cloudflareModel, body, prompt, n, responseFormat, []);
 }
@@ -63,13 +65,13 @@ export async function handleImageEdit(request: Request, env: Env): Promise<Respo
   const body = await readRequestBody<OpenAIImageEditRequest>(request);
   rejectUnsupportedStreaming(body.stream);
   rejectUnsupportedMask(body.mask);
-  validateClientOnlyParams(body);
   const prompt = readRequiredString(body.prompt, "prompt");
   const images = await readEditImages(body);
   const n = readOptionalIntegerInRange(body.n, "n", 1, 1, 10);
   const responseFormat = readResponseFormat(body.response_format);
   const requestedModel = readOptionalString(body.model, "model") ?? env.DEFAULT_IMAGE_MODEL ?? "gpt-image-2";
   const cloudflareModel = toCloudflareOpenAIModel(requestedModel, env.PUBLIC_MODEL_PREFIX ?? "");
+  validateClientOnlyParams(body, cloudflareModel);
 
   return await runOpenAIImagesRequest(env, cloudflareModel, body, prompt, n, responseFormat, images);
 }
@@ -80,12 +82,12 @@ export async function handleImageVariation(request: Request, env: Env): Promise<
   }
 
   const body = await readRequestBody<OpenAIImageVariationRequest>(request);
-  validateClientOnlyParams(body);
   const images = await readEditImages(body);
   const n = readOptionalIntegerInRange(body.n, "n", 1, 1, 10);
   const responseFormat = readResponseFormat(body.response_format, "url");
   const requestedModel = readOptionalString(body.model, "model") ?? env.DEFAULT_IMAGE_MODEL ?? "gpt-image-2";
   const cloudflareModel = toCloudflareOpenAIModel(requestedModel, env.PUBLIC_MODEL_PREFIX ?? "");
+  validateClientOnlyParams(body, cloudflareModel);
 
   return await runOpenAIImagesRequest(env, cloudflareModel, body, VARIATION_PROMPT, n, responseFormat, images);
 }
@@ -102,7 +104,7 @@ async function runOpenAIImagesRequest(
   const data: OpenAIImageData[] = [];
   let metadata: OpenAIImagesResponseMetadata = {};
   for (let index = 0; index < n; index += 1) {
-    const cfResult = await runCloudflareImageModel(env, cloudflareModel, buildCloudflareInput(body, prompt, images));
+    const cfResult = await runCloudflareImageModel(env, cloudflareModel, buildCloudflareInput(body, cloudflareModel, prompt, images));
     const firstImage = extractFirstImage(cfResult);
     metadata = { ...metadata, ...extractResponseMetadata(cfResult) };
 
@@ -315,33 +317,46 @@ export function toCloudflareOpenAIModel(model: string, publicModelPrefix: string
   return `${CLOUDFLARE_OPENAI_MODEL_PREFIX}${normalizedModel}`;
 }
 
-function buildCloudflareInput(body: OpenAIImageGenerationRequest, prompt: string, images: string[] = []): Record<string, unknown> {
+function buildCloudflareInput(
+  body: OpenAIImageGenerationRequest,
+  model: string,
+  prompt: string,
+  images: string[] = []
+): Record<string, unknown> {
   const input: Record<string, unknown> = { prompt };
   if (images.length > 0) {
     input.images = images;
   }
   copyStringEnumParam(body, input, "size", SUPPORTED_SIZE_VALUES);
   copyStringEnumParam(body, input, "quality", SUPPORTED_QUALITY_VALUES);
-  copyStringEnumParam(body, input, "background", SUPPORTED_BACKGROUND_VALUES);
-  copyStringEnumParam(body, input, "output_format", SUPPORTED_OUTPUT_FORMAT_VALUES);
+  if (isGptImage15Model(model)) {
+    copyStringEnumParam(body, input, "style", SUPPORTED_STYLE_VALUES);
+  } else {
+    copyStringEnumParam(body, input, "background", SUPPORTED_BACKGROUND_VALUES);
+    copyStringEnumParam(body, input, "output_format", SUPPORTED_OUTPUT_FORMAT_VALUES);
+  }
   return input;
 }
 
-function validateClientOnlyParams(body: OpenAIImageGenerationRequest): void {
+function validateClientOnlyParams(body: OpenAIImageGenerationRequest, model: string): void {
   copyStringEnumParam(body, {}, "moderation", SUPPORTED_MODERATION_VALUES);
   copyIntegerRangeParam(body, {}, "output_compression", 0, 100);
   copyIntegerRangeParam(body, {}, "partial_images", 0, 3);
   copyStringEnumParam(body, {}, "input_fidelity", SUPPORTED_INPUT_FIDELITY_VALUES);
   readOptionalString(body.user, "user");
 
-  if (body.style !== undefined && body.style !== null) {
+  if (!isGptImage15Model(model) && body.style !== undefined && body.style !== null) {
     throw new HttpError(
       400,
-      "Invalid parameter: style is only supported for dall-e-3, not Cloudflare gpt-image-2",
+      "Invalid parameter: style is only supported for Cloudflare gpt-image-1.5",
       "invalid_request_error",
       "style"
     );
   }
+}
+
+function isGptImage15Model(model: string): boolean {
+  return model === GPT_IMAGE_1_5_MODEL;
 }
 
 async function readEditImages(body: OpenAIImageEditRequest): Promise<string[]> {
