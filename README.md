@@ -4,6 +4,8 @@ Cloudflare Workers bridge that exposes Cloudflare AI Gateway image generation mo
 
 The initial target is Cloudflare's OpenAI `gpt-image-2` model. Cloudflare Workers AI returns an image URL for this model, while OpenAI-compatible clients usually expect `POST /v1/images/generations` to return `data[].b64_json` by default. This Worker translates that response so existing OpenAI Images API clients can call the Cloudflare-backed model.
 
+For caller-facing usage, authentication, request examples, SDK setup, and known limitations, see [CALLING.md](./CALLING.md).
+
 ## API
 
 ### `POST /v1/images/generations`
